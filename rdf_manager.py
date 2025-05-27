@@ -1,5 +1,6 @@
 """
-Enhanced RDF Graph Manager with TTL support and vector integration.
+Enhanced RDF Graph Manager with TTL support and SPARQL endpoint integration.
+Updated to work with vector store SPARQL endpoint connections.
 """
 
 import logging
@@ -18,14 +19,18 @@ logger = logging.getLogger(__name__)
 class EnhancedRDFManager:
     """
     Enhanced RDF manager that handles TTL files and integrates with GraphSparqlQAChain.
+    Can work with both local graphs and remote SPARQL endpoints.
     """
     
-    def __init__(self, ontology_path: str = "data/ontology.ttl"):
+    def __init__(self, 
+                 ontology_path: str = "data/ontology.ttl",
+                 vector_store=None):
         """
         Initialize Enhanced RDF Manager.
         
         Args:
             ontology_path: Path to the ontology TTL file
+            vector_store: Optional vector store instance with SPARQL endpoint
         """
         self.ontology_path = ontology_path
         self.graph = Graph()
@@ -33,6 +38,7 @@ class EnhancedRDFManager:
         self.sparql_chain = None
         self.namespaces = {}
         self.schema_info = {}
+        self.vector_store = vector_store
         
         # Common namespaces
         self.setup_namespaces()
@@ -86,21 +92,43 @@ class EnhancedRDFManager:
     def setup_langchain_integration(self):
         """Set up LangChain RdfGraph and GraphSparqlQAChain integration."""
         try:
-            # Create a temporary RDF file in a supported format for LangChain
+            # Check if we have a vector store with SPARQL endpoint
+            if (self.vector_store and 
+                hasattr(self.vector_store, 'sparql_endpoint_url') and 
+                self.vector_store.sparql_endpoint_url):
+                
+                logger.info("Using SPARQL endpoint from vector store for LangChain integration")
+                
+                # Use the SPARQL endpoint URL for LangChain
+                try:
+                    self.langchain_graph = RdfGraph(
+                        source_file=None,
+                        standard="sparql",
+                        graph_kwargs={
+                            "endpoint": self.vector_store.sparql_endpoint_url
+                        }
+                    )
+                    logger.info("LangChain RdfGraph initialized with SPARQL endpoint")
+                    return
+                except Exception as e:
+                    logger.warning(f"Could not use SPARQL endpoint for LangChain: {e}")
+                    logger.info("Falling back to local RDF file method")
+            
+            # Fallback: Create a temporary RDF file for LangChain
             temp_rdf_path = self.ontology_path.replace('.ttl', '_temp.rdf')
             
             # Serialize graph to RDF/XML format (supported by LangChain)
             with open(temp_rdf_path, 'w', encoding='utf-8') as f:
                 self.graph.serialize(f, format='xml')
             
-            # Initialize LangChain RdfGraph
+            # Initialize LangChain RdfGraph with local file
             self.langchain_graph = RdfGraph(
                 source_file=temp_rdf_path,
                 standard="rdf",
                 local_copy=temp_rdf_path
             )
             
-            logger.info("LangChain RdfGraph integration initialized")
+            logger.info("LangChain RdfGraph integration initialized with local file")
             
         except Exception as e:
             logger.warning(f"Could not set up LangChain integration: {e}")
@@ -207,6 +235,140 @@ class EnhancedRDFManager:
             
         except Exception as e:
             logger.error(f"Error extracting schema info: {e}")
+    
+    def query_sparql(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Execute a SPARQL query on the graph or remote endpoint.
+        
+        Args:
+            query: SPARQL query string
+            
+        Returns:
+            List of result dictionaries
+        """
+        # Try to use remote SPARQL endpoint first if available
+        if (self.vector_store and 
+            hasattr(self.vector_store, 'execute_sparql_query') and
+            self.vector_store.sparql_endpoint_url):
+            
+            try:
+                logger.info("Executing SPARQL query on remote endpoint")
+                return self.vector_store.execute_sparql_query(query)
+            except Exception as e:
+                logger.warning(f"Remote SPARQL query failed, trying local graph: {e}")
+        
+        # Fallback to local graph
+        try:
+            logger.info("Executing SPARQL query on local graph")
+            results = []
+            query_result = self.graph.query(query)
+            
+            for row in query_result:
+                result_dict = {}
+                for i, var in enumerate(query_result.vars):
+                    value = row[i]
+                    if value is not None:
+                        if isinstance(value, URIRef):
+                            result_dict[str(var)] = str(value)
+                        elif isinstance(value, Literal):
+                            result_dict[str(var)] = str(value)
+                        else:
+                            result_dict[str(var)] = str(value)
+                    else:
+                        result_dict[str(var)] = None
+                results.append(result_dict)
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error executing SPARQL query on local graph: {e}")
+            return []
+    
+    def query_with_langchain(self, question: str) -> Dict[str, Any]:
+        """
+        Query using LangChain's GraphSparqlQAChain.
+        
+        Args:
+            question: Natural language question
+            
+        Returns:
+            Dictionary with answer and SPARQL query
+        """
+        try:
+            if self.sparql_chain is None:
+                return {
+                    'error': 'SPARQL chain not initialized',
+                    'answer': None,
+                    'sparql_query': None
+                }
+            
+            result = self.sparql_chain.invoke({"query": question})
+            
+            return {
+                'answer': result.get('result', ''),
+                'sparql_query': result.get('sparql_query', ''),
+                'error': None
+            }
+            
+        except Exception as e:
+            logger.error(f"Error querying with LangChain: {e}")
+            return {
+                'error': str(e),
+                'answer': None,
+                'sparql_query': None
+            }
+    
+    def get_schema_summary(self) -> str:
+        """Get a textual summary of the ontology schema."""
+        try:
+            summary_parts = []
+            
+            summary_parts.append("=== ONTOLOGY SCHEMA SUMMARY ===")
+            summary_parts.append(f"Total Triples: {len(self.graph)}")
+            summary_parts.append(f"Classes: {len(self.schema_info['classes'])}")
+            summary_parts.append(f"Properties: {len(self.schema_info['properties'])}")
+            summary_parts.append(f"Individuals: {len(self.schema_info['individuals'])}")
+            
+            # Add SPARQL endpoint info if available
+            if (self.vector_store and 
+                hasattr(self.vector_store, 'get_sparql_endpoint_info')):
+                endpoint_info = self.vector_store.get_sparql_endpoint_info()
+                if endpoint_info['status'] == 'configured':
+                    summary_parts.append(f"SPARQL Endpoint: {endpoint_info['endpoint_url']}")
+                    summary_parts.append(f"Authentication: {endpoint_info.get('authentication', {})}")
+            
+            summary_parts.append("")
+            
+            # List classes
+            if self.schema_info['classes']:
+                summary_parts.append("CLASSES:")
+                for cls in self.schema_info['classes'][:10]:  # Show first 10
+                    labels = f" ({', '.join(cls['labels'])})" if cls['labels'] else ""
+                    summary_parts.append(f"  - {cls['local_name']}{labels}")
+                if len(self.schema_info['classes']) > 10:
+                    summary_parts.append(f"  ... and {len(self.schema_info['classes']) - 10} more")
+                summary_parts.append("")
+            
+            # List properties
+            if self.schema_info['properties']:
+                summary_parts.append("PROPERTIES:")
+                for prop in self.schema_info['properties'][:10]:  # Show first 10
+                    labels = f" ({', '.join(prop['labels'])})" if prop['labels'] else ""
+                    summary_parts.append(f"  - {prop['local_name']} ({prop['type']}){labels}")
+                if len(self.schema_info['properties']) > 10:
+                    summary_parts.append(f"  ... and {len(self.schema_info['properties']) - 10} more")
+                summary_parts.append("")
+            
+            # List namespaces
+            summary_parts.append("NAMESPACES:")
+            for prefix, namespace in list(self.namespaces.items())[:10]:
+                summary_parts.append(f"  {prefix}: {namespace}")
+            
+            return "\n".join(summary_parts)
+            
+        except Exception as e:
+            logger.error(f"Error generating schema summary: {e}")
+            return "Error generating schema summary"
     
     def get_all_entities(self) -> List[Dict[str, Any]]:
         """
@@ -465,118 +627,6 @@ class EnhancedRDFManager:
         
         return property_values
     
-    def query_sparql(self, query: str) -> List[Dict[str, Any]]:
-        """
-        Execute a SPARQL query on the graph.
-        
-        Args:
-            query: SPARQL query string
-            
-        Returns:
-            List of result dictionaries
-        """
-        try:
-            results = []
-            query_result = self.graph.query(query)
-            
-            for row in query_result:
-                result_dict = {}
-                for i, var in enumerate(query_result.vars):
-                    value = row[i]
-                    if value is not None:
-                        if isinstance(value, URIRef):
-                            result_dict[str(var)] = str(value)
-                        elif isinstance(value, Literal):
-                            result_dict[str(var)] = str(value)
-                        else:
-                            result_dict[str(var)] = str(value)
-                    else:
-                        result_dict[str(var)] = None
-                results.append(result_dict)
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Error executing SPARQL query: {e}")
-            return []
-    
-    def query_with_langchain(self, question: str) -> Dict[str, Any]:
-        """
-        Query using LangChain's GraphSparqlQAChain.
-        
-        Args:
-            question: Natural language question
-            
-        Returns:
-            Dictionary with answer and SPARQL query
-        """
-        try:
-            if self.sparql_chain is None:
-                return {
-                    'error': 'SPARQL chain not initialized',
-                    'answer': None,
-                    'sparql_query': None
-                }
-            
-            result = self.sparql_chain.invoke({"query": question})
-            
-            return {
-                'answer': result.get('result', ''),
-                'sparql_query': result.get('sparql_query', ''),
-                'error': None
-            }
-            
-        except Exception as e:
-            logger.error(f"Error querying with LangChain: {e}")
-            return {
-                'error': str(e),
-                'answer': None,
-                'sparql_query': None
-            }
-    
-    def get_schema_summary(self) -> str:
-        """Get a textual summary of the ontology schema."""
-        try:
-            summary_parts = []
-            
-            summary_parts.append("=== ONTOLOGY SCHEMA SUMMARY ===")
-            summary_parts.append(f"Total Triples: {len(self.graph)}")
-            summary_parts.append(f"Classes: {len(self.schema_info['classes'])}")
-            summary_parts.append(f"Properties: {len(self.schema_info['properties'])}")
-            summary_parts.append(f"Individuals: {len(self.schema_info['individuals'])}")
-            summary_parts.append("")
-            
-            # List classes
-            if self.schema_info['classes']:
-                summary_parts.append("CLASSES:")
-                for cls in self.schema_info['classes'][:10]:  # Show first 10
-                    labels = f" ({', '.join(cls['labels'])})" if cls['labels'] else ""
-                    summary_parts.append(f"  - {cls['local_name']}{labels}")
-                if len(self.schema_info['classes']) > 10:
-                    summary_parts.append(f"  ... and {len(self.schema_info['classes']) - 10} more")
-                summary_parts.append("")
-            
-            # List properties
-            if self.schema_info['properties']:
-                summary_parts.append("PROPERTIES:")
-                for prop in self.schema_info['properties'][:10]:  # Show first 10
-                    labels = f" ({', '.join(prop['labels'])})" if prop['labels'] else ""
-                    summary_parts.append(f"  - {prop['local_name']} ({prop['type']}){labels}")
-                if len(self.schema_info['properties']) > 10:
-                    summary_parts.append(f"  ... and {len(self.schema_info['properties']) - 10} more")
-                summary_parts.append("")
-            
-            # List namespaces
-            summary_parts.append("NAMESPACES:")
-            for prefix, namespace in list(self.namespaces.items())[:10]:
-                summary_parts.append(f"  {prefix}: {namespace}")
-            
-            return "\n".join(summary_parts)
-            
-        except Exception as e:
-            logger.error(f"Error generating schema summary: {e}")
-            return "Error generating schema summary"
-    
     def _get_local_name(self, uri: URIRef) -> str:
         """Get the local name of a URI."""
         try:
@@ -607,60 +657,102 @@ class EnhancedRDFManager:
     def find_related_entities(self, entity_uri: str, max_depth: int = 2) -> List[Dict[str, Any]]:
         """
         Find entities related to a given entity up to a certain depth.
-        
-        Args:
-            entity_uri: URI of the entity to start from
-            max_depth: Maximum relationship depth to explore
-            
-        Returns:
-            List of related entities with relationship information
+        Uses both local graph and remote SPARQL endpoint if available.
         """
         try:
-            related_entities = []
-            visited = set()
+            # If we have a SPARQL endpoint, try to use it for richer results
+            if (self.vector_store and 
+                hasattr(self.vector_store, 'execute_sparql_query') and
+                self.vector_store.sparql_endpoint_url):
+                
+                try:
+                    return self._find_related_entities_sparql(entity_uri, max_depth)
+                except Exception as e:
+                    logger.warning(f"SPARQL endpoint query for related entities failed: {e}")
             
-            def explore_relationships(uri: str, depth: int, path: List[str]):
-                if depth > max_depth or uri in visited:
-                    return
-                
-                visited.add(uri)
-                uri_ref = URIRef(uri)
-                
-                # Find outgoing relationships
-                for predicate, obj in self.graph.predicate_objects(uri_ref):
-                    if isinstance(obj, URIRef) and str(obj) not in visited:
-                        related_entities.append({
-                            'uri': str(obj),
-                            'local_name': self._get_local_name(obj),
-                            'relationship': self._get_local_name(predicate),
-                            'relationship_uri': str(predicate),
-                            'depth': depth + 1,
-                            'path': path + [self._get_local_name(predicate)],
-                            'direction': 'outgoing'
-                        })
-                        
-                        if depth < max_depth:
-                            explore_relationships(str(obj), depth + 1, path + [self._get_local_name(predicate)])
-                
-                # Find incoming relationships
-                for subject, predicate in self.graph.subject_predicates(uri_ref):
-                    if isinstance(subject, URIRef) and str(subject) not in visited:
-                        related_entities.append({
-                            'uri': str(subject),
-                            'local_name': self._get_local_name(subject),
-                            'relationship': f"inverse_{self._get_local_name(predicate)}",
-                            'relationship_uri': str(predicate),
-                            'depth': depth + 1,
-                            'path': path + [f"inverse_{self._get_local_name(predicate)}"],
-                            'direction': 'incoming'
-                        })
-                        
-                        if depth < max_depth:
-                            explore_relationships(str(subject), depth + 1, path + [f"inverse_{self._get_local_name(predicate)}"])
-            
-            explore_relationships(entity_uri, 0, [])
-            return related_entities
+            # Fallback to local graph
+            return self._find_related_entities_local(entity_uri, max_depth)
             
         except Exception as e:
             logger.error(f"Error finding related entities: {e}")
             return []
+    
+    def _find_related_entities_sparql(self, entity_uri: str, max_depth: int) -> List[Dict[str, Any]]:
+        """Find related entities using SPARQL endpoint."""
+        query = f"""
+        SELECT DISTINCT ?related ?predicate ?direction ?label
+        WHERE {{
+            {{
+                <{entity_uri}> ?predicate ?related .
+                BIND("outgoing" AS ?direction)
+            }} UNION {{
+                ?related ?predicate <{entity_uri}> .
+                BIND("incoming" AS ?direction)
+            }}
+            FILTER(isURI(?related))
+            OPTIONAL {{ ?related rdfs:label ?label }}
+        }}
+        LIMIT 20
+        """
+        
+        results = self.vector_store.execute_sparql_query(query)
+        
+        related_entities = []
+        for result in results:
+            related_entities.append({
+                'uri': result.get('related', ''),
+                'local_name': result.get('label', self._get_local_name(URIRef(result.get('related', '')))),
+                'relationship': self._get_local_name(URIRef(result.get('predicate', ''))),
+                'relationship_uri': result.get('predicate', ''),
+                'depth': 1,
+                'direction': result.get('direction', 'outgoing')
+            })
+        
+        return related_entities
+    
+    def _find_related_entities_local(self, entity_uri: str, max_depth: int) -> List[Dict[str, Any]]:
+        """Find related entities using local graph."""
+        related_entities = []
+        visited = set()
+        
+        def explore_relationships(uri: str, depth: int, path: List[str]):
+            if depth > max_depth or uri in visited:
+                return
+            
+            visited.add(uri)
+            uri_ref = URIRef(uri)
+            
+            # Find outgoing relationships
+            for predicate, obj in self.graph.predicate_objects(uri_ref):
+                if isinstance(obj, URIRef) and str(obj) not in visited:
+                    related_entities.append({
+                        'uri': str(obj),
+                        'local_name': self._get_local_name(obj),
+                        'relationship': self._get_local_name(predicate),
+                        'relationship_uri': str(predicate),
+                        'depth': depth + 1,
+                        'path': path + [self._get_local_name(predicate)],
+                        'direction': 'outgoing'
+                    })
+                    
+                    if depth < max_depth:
+                        explore_relationships(str(obj), depth + 1, path + [self._get_local_name(predicate)])
+            
+            # Find incoming relationships
+            for subject, predicate in self.graph.subject_predicates(uri_ref):
+                if isinstance(subject, URIRef) and str(subject) not in visited:
+                    related_entities.append({
+                        'uri': str(subject),
+                        'local_name': self._get_local_name(subject),
+                        'relationship': f"inverse_{self._get_local_name(predicate)}",
+                        'relationship_uri': str(predicate),
+                        'depth': depth + 1,
+                        'path': path + [f"inverse_{self._get_local_name(predicate)}"],
+                        'direction': 'incoming'
+                    })
+                    
+                    if depth < max_depth:
+                        explore_relationships(str(subject), depth + 1, path + [f"inverse_{self._get_local_name(predicate)}"])
+        
+        explore_relationships(entity_uri, 0, [])
+        return related_entities
