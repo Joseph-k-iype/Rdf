@@ -62,6 +62,29 @@ def setup_environment():
         logger.error("Please ensure your ontology.ttl file exists in the data/ directory")
         return False
     
+    # Check Elasticsearch configuration
+    es_hosts = os.getenv("ELASTICSEARCH_HOSTS", "http://localhost:9200")
+    logger.info(f"Elasticsearch configured for: {es_hosts}")
+    
+    # Test Elasticsearch connection (optional)
+    try:
+        import requests
+        hosts = [h.strip() for h in es_hosts.split(",")]
+        for host in hosts:
+            if not host.startswith(('http://', 'https://')):
+                host = f"http://{host}"
+            
+            response = requests.get(host, timeout=5)
+            if response.status_code == 200:
+                logger.info(f"✓ Elasticsearch accessible at {host}")
+                break
+        else:
+            logger.warning("⚠ Elasticsearch not accessible - vector search will be disabled")
+            logger.warning("You can still use the chatbot with SPARQL-only mode")
+    except Exception as e:
+        logger.warning(f"⚠ Could not test Elasticsearch connection: {e}")
+        logger.warning("Vector search may not be available")
+    
     return True
 
 def run_interactive_mode():
