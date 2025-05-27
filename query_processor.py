@@ -108,7 +108,280 @@ class EnhancedQueryProcessor:
             'existence': ['exist', 'there', 'any', 'have', 'find'],
             'count': ['many', 'count', 'number', 'total', 'how much']
         }
+
     
+    def _generate_targeted_sparql_queries(self, 
+                                     query: str, 
+                                     classification: Dict[str, Any], 
+                                     concepts: List[str]) -> List[Dict[str, str]]:
+    """Generate targeted SPARQL queries based on query classification with improved syntax."""
+    queries = []
+    primary_intent = classification['primary_intent']
+    
+    try:
+        if primary_intent == 'listing':
+            # Generate queries to list entities
+            for concept in concepts[:3]:  # Limit to first 3 concepts
+                # List classes containing the concept
+                queries.append({
+                    'type': 'list_classes',
+                    'query': self._build_list_classes_query(concept),
+                    'description': f'Classes related to "{concept}"'
+                })
+                
+                # List properties containing the concept
+                queries.append({
+                    'type': 'list_properties',
+                    'query': self._build_list_properties_query(concept),
+                    'description': f'Properties related to "{concept}"'
+                })
+        
+        elif primary_intent == 'hierarchical':
+            for concept in concepts[:2]:
+                # Find subclasses
+                queries.append({
+                    'type': 'subclasses',
+                    'query': self._build_subclasses_query(concept),
+                    'description': f'Subclasses of classes related to "{concept}"'
+                })
+                
+                # Find superclasses
+                queries.append({
+                    'type': 'superclasses',
+                    'query': self._build_superclasses_query(concept),
+                    'description': f'Superclasses of classes related to "{concept}"'
+                })
+        
+        elif primary_intent == 'relationship':
+            if len(concepts) >= 2:
+                concept1, concept2 = concepts[0], concepts[1]
+                # Find relationships between concepts
+                queries.append({
+                    'type': 'relationships',
+                    'query': self._build_relationships_query(concept1, concept2),
+                    'description': f'Relationships between "{concept1}" and "{concept2}"'
+                })
+        
+        elif primary_intent == 'count':
+            for concept in concepts[:2]:
+                # Count entities related to concept
+                queries.append({
+                    'type': 'count_classes',
+                    'query': self._build_count_classes_query(concept),
+                    'description': f'Count of classes related to "{concept}"'
+                })
+        
+        return queries
+        
+    except Exception as e:
+        logger.error(f"Error generating SPARQL queries: {e}")
+        return []
+
+def _build_list_classes_query(self, concept: str) -> str:
+    """Build a well-formed SPARQL query to list classes."""
+    return f"""
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+
+SELECT ?class ?label WHERE {{
+    ?class rdf:type owl:Class .
+    OPTIONAL {{ ?class rdfs:label ?label }}
+    FILTER(
+        CONTAINS(LCASE(STR(?class)), LCASE("{self._escape_sparql_string(concept)}")) || 
+        CONTAINS(LCASE(STR(?label)), LCASE("{self._escape_sparql_string(concept)}"))
+    )
+}} 
+ORDER BY ?class
+LIMIT 20
+"""
+
+def _build_list_properties_query(self, concept: str) -> str:
+    """Build a well-formed SPARQL query to list properties."""
+    return f"""
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+
+SELECT ?property ?label ?type WHERE {{
+    {{
+        ?property rdf:type owl:ObjectProperty .
+        BIND("ObjectProperty" AS ?type)
+    }} UNION {{
+        ?property rdf:type owl:DatatypeProperty .
+        BIND("DatatypeProperty" AS ?type)
+    }}
+    OPTIONAL {{ ?property rdfs:label ?label }}
+    FILTER(
+        CONTAINS(LCASE(STR(?property)), LCASE("{self._escape_sparql_string(concept)}")) || 
+        CONTAINS(LCASE(STR(?label)), LCASE("{self._escape_sparql_string(concept)}"))
+    )
+}} 
+ORDER BY ?property
+LIMIT 15
+"""
+
+def _build_subclasses_query(self, concept: str) -> str:
+    """Build a well-formed SPARQL query to find subclasses."""
+    return f"""
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+
+SELECT ?subclass ?label WHERE {{
+    ?class rdf:type owl:Class .
+    ?subclass rdfs:subClassOf ?class .
+    ?subclass rdf:type owl:Class .
+    OPTIONAL {{ ?subclass rdfs:label ?label }}
+    OPTIONAL {{ ?class rdfs:label ?classLabel }}
+    FILTER(
+        CONTAINS(LCASE(STR(?class)), LCASE("{self._escape_sparql_string(concept)}")) || 
+        CONTAINS(LCASE(STR(?classLabel)), LCASE("{self._escape_sparql_string(concept)}"))
+    )
+}} 
+ORDER BY ?subclass
+LIMIT 15
+"""
+
+def _build_superclasses_query(self, concept: str) -> str:
+    """Build a well-formed SPARQL query to find superclasses."""
+    return f"""
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+
+SELECT ?superclass ?label WHERE {{
+    ?class rdf:type owl:Class .
+    ?class rdfs:subClassOf ?superclass .
+    ?superclass rdf:type owl:Class .
+    OPTIONAL {{ ?superclass rdfs:label ?label }}
+    OPTIONAL {{ ?class rdfs:label ?classLabel }}
+    FILTER(
+        CONTAINS(LCASE(STR(?class)), LCASE("{self._escape_sparql_string(concept)}")) || 
+        CONTAINS(LCASE(STR(?classLabel)), LCASE("{self._escape_sparql_string(concept)}"))
+    )
+}} 
+ORDER BY ?superclass
+LIMIT 15
+"""
+
+def _build_relationships_query(self, concept1: str, concept2: str) -> str:
+    """Build a well-formed SPARQL query to find relationships between concepts."""
+    return f"""
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+
+SELECT ?subject ?predicate ?object ?subjectLabel ?objectLabel WHERE {{
+    ?subject ?predicate ?object .
+    OPTIONAL {{ ?subject rdfs:label ?subjectLabel }}
+    OPTIONAL {{ ?object rdfs:label ?objectLabel }}
+    FILTER(
+        (
+            CONTAINS(LCASE(STR(?subject)), LCASE("{self._escape_sparql_string(concept1)}")) || 
+            CONTAINS(LCASE(STR(?subjectLabel)), LCASE("{self._escape_sparql_string(concept1)}"))
+        ) && (
+            CONTAINS(LCASE(STR(?object)), LCASE("{self._escape_sparql_string(concept2)}")) || 
+            CONTAINS(LCASE(STR(?objectLabel)), LCASE("{self._escape_sparql_string(concept2)}"))
+        )
+    ) || (
+        (
+            CONTAINS(LCASE(STR(?subject)), LCASE("{self._escape_sparql_string(concept2)}")) || 
+            CONTAINS(LCASE(STR(?subjectLabel)), LCASE("{self._escape_sparql_string(concept2)}"))
+        ) && (
+            CONTAINS(LCASE(STR(?object)), LCASE("{self._escape_sparql_string(concept1)}")) || 
+            CONTAINS(LCASE(STR(?objectLabel)), LCASE("{self._escape_sparql_string(concept1)}"))
+        )
+    )
+    FILTER(?predicate != rdf:type)
+}} 
+ORDER BY ?subject ?predicate
+LIMIT 20
+"""
+
+def _build_count_classes_query(self, concept: str) -> str:
+    """Build a well-formed SPARQL query to count classes."""
+    return f"""
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+
+SELECT (COUNT(DISTINCT ?class) AS ?count) WHERE {{
+    ?class rdf:type owl:Class .
+    OPTIONAL {{ ?class rdfs:label ?label }}
+    FILTER(
+        CONTAINS(LCASE(STR(?class)), LCASE("{self._escape_sparql_string(concept)}")) || 
+        CONTAINS(LCASE(STR(?label)), LCASE("{self._escape_sparql_string(concept)}"))
+    )
+}}
+"""
+
+def _escape_sparql_string(self, text: str) -> str:
+    """Escape special characters in SPARQL string literals."""
+    if not text:
+        return ""
+    
+    # Replace quotes and backslashes that could break SPARQL
+    text = text.replace('\\', '\\\\')  # Escape backslashes first
+    text = text.replace('"', '\\"')    # Escape double quotes
+    text = text.replace("'", "\\'")    # Escape single quotes
+    text = text.replace('\n', '\\n')   # Escape newlines
+    text = text.replace('\r', '\\r')   # Escape carriage returns
+    text = text.replace('\t', '\\t')   # Escape tabs
+    
+    # Remove any other potentially problematic characters
+    import re
+    text = re.sub(r'[^\w\s\-_.]', '', text)
+    
+    return text
+
+def test_sparql_query_generation(self) -> Dict[str, Any]:
+    """Test SPARQL query generation with various inputs."""
+    try:
+        test_results = {}
+        
+        # Test basic query generation
+        test_cases = [
+            ("listing", ["Person", "Class"]),
+            ("hierarchical", ["Animal", "Vehicle"]),
+            ("relationship", ["Person", "hasName"]),
+            ("count", ["Property"])
+        ]
+        
+        for intent, concepts in test_cases:
+            try:
+                classification = {'primary_intent': intent}
+                queries = self._generate_targeted_sparql_queries("test query", classification, concepts)
+                
+                test_results[intent] = {
+                    'success': True,
+                    'query_count': len(queries),
+                    'queries': [q['query'] for q in queries]
+                }
+                
+                # Test syntax validation for each query
+                for query_info in queries:
+                    validation = self.rdf_manager.validate_sparql_query_syntax(query_info['query'])
+                    if not validation.get('valid', False):
+                        test_results[intent]['syntax_errors'] = test_results[intent].get('syntax_errors', [])
+                        test_results[intent]['syntax_errors'].append(validation.get('error', 'Unknown error'))
+                        
+            except Exception as e:
+                test_results[intent] = {
+                    'success': False,
+                    'error': str(e)
+                }
+        
+        return {
+            'overall_success': all(result.get('success', False) for result in test_results.values()),
+            'test_results': test_results
+        }
+        
+    except Exception as e:
+        return {
+            'overall_success': False,
+            'error': str(e)
+        }
     def process_query(self, 
                      user_query: str, 
                      top_k: int = 15,
