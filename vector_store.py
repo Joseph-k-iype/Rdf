@@ -32,7 +32,8 @@ class EnhancedElasticsearchVectorStore:
             embedding_model: Azure OpenAI embedding model name
             embedding_dimensions: Dimension of the embedding vectors
         """
-        self.hosts = hosts or ["localhost:9200"]
+        # Parse and validate Elasticsearch hosts
+        self.hosts = self._parse_elasticsearch_hosts(hosts)
         self.index_name = index_name
         self.embedding_model_name = embedding_model
         self.embedding_dimensions = embedding_dimensions
@@ -42,34 +43,8 @@ class EnhancedElasticsearchVectorStore:
         
         # Initialize Elasticsearch client
         try:
-            # Configure Elasticsearch connection
-            es_config = {
-                "hosts": self.hosts,
-                "timeout": 30,
-                "max_retries": 3,
-                "retry_on_timeout": True
-            }
-            
-            # Add authentication if provided
-            if os.getenv("ELASTICSEARCH_USERNAME") and os.getenv("ELASTICSEARCH_PASSWORD"):
-                es_config["basic_auth"] = (
-                    os.getenv("ELASTICSEARCH_USERNAME"),
-                    os.getenv("ELASTICSEARCH_PASSWORD")
-                )
-            
-            # Add SSL configuration if needed
-            if os.getenv("ELASTICSEARCH_USE_SSL", "false").lower() == "true":
-                es_config["use_ssl"] = True
-                es_config["verify_certs"] = True
-            
-            self.es = Elasticsearch(**es_config)
-            
-            # Test connection
-            if self.es.ping():
-                logger.info(f"Connected to Elasticsearch at {self.hosts}")
-            else:
-                raise ConnectionError("Could not connect to Elasticsearch")
-                
+            self.es = self._setup_elasticsearch_client()
+            logger.info(f"Connected to Elasticsearch at {self.hosts}")
         except Exception as e:
             logger.error(f"Failed to connect to Elasticsearch: {e}")
             raise
@@ -241,6 +216,118 @@ class EnhancedElasticsearchVectorStore:
             
         except Exception as e:
             logger.error(f"Failed to setup embedding model: {e}")
+            raise
+    
+    def _parse_elasticsearch_hosts(self, hosts: Optional[List[str]]) -> List[str]:
+        """
+        Parse and validate Elasticsearch host URLs.
+        
+        Args:
+            hosts: List of host addresses (can be host:port or full URLs)
+            
+        Returns:
+            List of properly formatted Elasticsearch URLs
+        """
+        if not hosts:
+            # Get from environment variable
+            hosts_env = os.getenv("ELASTICSEARCH_HOSTS", "localhost:9200")
+            hosts = [h.strip() for h in hosts_env.split(",") if h.strip()]
+        
+        formatted_hosts = []
+        for host in hosts:
+            host = host.strip()
+            
+            # Check if host already includes scheme
+            if host.startswith(('http://', 'https://')):
+                formatted_hosts.append(host)
+            else:
+                # Add http scheme for hosts without scheme
+                if ':' in host:
+                    # host:port format
+                    formatted_hosts.append(f"http://{host}")
+                else:
+                    # just hostname, add default port
+                    formatted_hosts.append(f"http://{host}:9200")
+        
+        logger.info(f"Elasticsearch hosts: {formatted_hosts}")
+        return formatted_hosts
+    
+    def _setup_elasticsearch_client(self) -> Elasticsearch:
+        """
+        Set up Elasticsearch client with proper configuration.
+        
+        Returns:
+            Configured Elasticsearch client
+        """
+        try:
+            # Configure Elasticsearch connection
+            es_config = {
+                "hosts": self.hosts,
+                "timeout": 30,
+                "max_retries": 3,
+                "retry_on_timeout": True,
+                "request_timeout": 60,
+                "retry_on_status": [429, 502, 503, 504]
+            }
+            
+            # Add authentication if provided
+            username = os.getenv("ELASTICSEARCH_USERNAME")
+            password = os.getenv("ELASTICSEARCH_PASSWORD")
+            if username and password:
+                es_config["basic_auth"] = (username, password)
+                logger.info("Using basic authentication for Elasticsearch")
+            
+            # Add SSL configuration if needed
+            use_ssl = os.getenv("ELASTICSEARCH_USE_SSL", "false").lower() == "true"
+            if use_ssl:
+                es_config["use_ssl"] = True
+                es_config["verify_certs"] = True
+                logger.info("Using SSL for Elasticsearch connection")
+            
+            # Add additional SSL options for self-signed certificates if needed
+            if os.getenv("ELASTICSEARCH_VERIFY_CERTS", "true").lower() == "false":
+                es_config["verify_certs"] = False
+                es_config["ssl_show_warn"] = False
+                logger.warning("SSL certificate verification disabled")
+            
+            # Create Elasticsearch client
+            es_client = Elasticsearch(**es_config)
+            
+            # Test connection with retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    if es_client.ping():
+                        logger.info("✓ Elasticsearch connection test successful")
+                        
+                        # Log cluster info
+                        cluster_info = es_client.info()
+                        logger.info(f"Connected to Elasticsearch cluster: {cluster_info['cluster_name']} "
+                                   f"(version: {cluster_info['version']['number']})")
+                        
+                        return es_client
+                    else:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Elasticsearch ping failed, retrying... ({attempt + 1}/{max_retries})")
+                            import time
+                            time.sleep(2 ** attempt)  # Exponential backoff
+                        else:
+                            raise ConnectionError("Elasticsearch ping failed after all retries")
+                
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Elasticsearch connection attempt {attempt + 1} failed: {e}")
+                        import time
+                        time.sleep(2 ** attempt)
+                    else:
+                        raise
+            
+            raise ConnectionError("Could not establish connection to Elasticsearch")
+            
+        except Exception as e:
+            logger.error(f"Failed to setup Elasticsearch client: {e}")
+            logger.error(f"Elasticsearch hosts: {self.hosts}")
+            logger.error(f"Configuration: timeout=30, max_retries=3")
             raise
     
     def add_entities(self, entities: List[Dict[str, Any]], batch_size: int = 50) -> bool:
