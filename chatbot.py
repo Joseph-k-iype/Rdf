@@ -58,6 +58,130 @@ class EnhancedRDFChatbot:
         
         # Initialize components
         self._initialize_components()
+
+    def _setup_llm(self) -> Optional[AzureChatOpenAI]:
+    """Set up Azure OpenAI LLM with token authentication."""
+    try:
+        # Get Azure credentials
+        tenant_id = os.getenv("AZURE_TENANT_ID")
+        client_id = os.getenv("AZURE_CLIENT_ID")
+        client_secret = os.getenv("AZURE_CLIENT_SECRET")
+        azure_endpoint = os.getenv("AZURE_ENDPOINT")
+        
+        if not all([tenant_id, client_id, client_secret, azure_endpoint]):
+            logger.error("Missing Azure OpenAI credentials")
+            return None
+        
+        logger.info("Getting Azure token for LLM initialization...")
+        
+        # Get token using the enhanced auth helper
+        token = get_azure_token(
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            scope="https://cognitiveservices.azure.com/.default"
+        )
+        
+        if not token:
+            logger.error("Failed to obtain Azure token")
+            return None
+        
+        logger.info(f"✓ Azure token obtained successfully: {token[:20]}...")
+        
+        # Create token provider function that refreshes tokens automatically
+        def token_provider():
+            fresh_token = get_azure_token(
+                tenant_id=tenant_id,
+                client_id=client_id,
+                client_secret=client_secret,
+                scope="https://cognitiveservices.azure.com/.default"
+            )
+            if not fresh_token:
+                logger.warning("Token provider returned None, using cached token")
+                return token  # Fallback to initial token
+            return fresh_token
+        
+        # Initialize LLM with proper token handling
+        logger.info("Initializing AzureChatOpenAI...")
+        
+        try:
+            # Try with azure_ad_token_provider first (newer LangChain versions)
+            llm = AzureChatOpenAI(
+                model=self.llm_model,
+                azure_endpoint=azure_endpoint,
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+                azure_ad_token_provider=token_provider,
+                temperature=float(os.getenv("TEMPERATURE", "0.1")),
+                max_tokens=int(os.getenv("MAX_TOKENS", "4000")),
+                streaming=False,  # Disable for better compatibility with SPARQL chain
+                request_timeout=60.0,
+                max_retries=3
+            )
+            logger.info("✓ LLM initialized with azure_ad_token_provider")
+            
+        except Exception as provider_error:
+            logger.warning(f"azure_ad_token_provider failed: {provider_error}")
+            logger.info("Trying with direct azure_ad_token...")
+            
+            # Fallback: Try with direct token (older LangChain versions or different parameter name)
+            try:
+                llm = AzureChatOpenAI(
+                    model=self.llm_model,
+                    azure_endpoint=azure_endpoint,
+                    api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+                    azure_ad_token=token,  # Direct token instead of provider
+                    temperature=float(os.getenv("TEMPERATURE", "0.1")),
+                    max_tokens=int(os.getenv("MAX_TOKENS", "4000")),
+                    streaming=False,
+                    request_timeout=60.0,
+                    max_retries=3
+                )
+                logger.info("✓ LLM initialized with direct azure_ad_token")
+                
+            except Exception as direct_error:
+                logger.error(f"Direct azure_ad_token also failed: {direct_error}")
+                
+                # Final fallback: Try with API key approach if available
+                api_key = os.getenv("AZURE_OPENAI_API_KEY")
+                if api_key:
+                    logger.info("Trying with Azure OpenAI API key...")
+                    llm = AzureChatOpenAI(
+                        model=self.llm_model,
+                        azure_endpoint=azure_endpoint,
+                        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+                        api_key=api_key,
+                        temperature=float(os.getenv("TEMPERATURE", "0.1")),
+                        max_tokens=int(os.getenv("MAX_TOKENS", "4000")),
+                        streaming=False,
+                        request_timeout=60.0,
+                        max_retries=3
+                    )
+                    logger.info("✓ LLM initialized with API key")
+                else:
+                    logger.error("No API key available as fallback")
+                    raise direct_error
+        
+        # Test the LLM with a simple call
+        logger.info("Testing LLM with a simple call...")
+        try:
+            test_response = llm.invoke("Hello, this is a test.")
+            if test_response:
+                logger.info("✓ LLM test successful")
+                return llm
+            else:
+                logger.error("LLM test returned empty response")
+                return None
+        except Exception as test_error:
+            logger.error(f"LLM test failed: {test_error}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error setting up LLM: {e}")
+        logger.error("Please check your Azure OpenAI configuration:")
+        logger.error("1. Verify AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET")
+        logger.error("2. Verify AZURE_ENDPOINT and model deployment")
+        logger.error("3. Check if the service principal has proper permissions")
+        return None
     
     def _initialize_components(self):
         """Initialize all chatbot components."""
