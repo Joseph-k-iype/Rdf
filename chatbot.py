@@ -184,67 +184,84 @@ class EnhancedRDFChatbot:
         return None
     
     def _initialize_components(self):
-        """Initialize all chatbot components."""
+    """Initialize all chatbot components with proper dependency order."""
+    try:
+        logger.info("=== Initializing Enhanced RDF Chatbot ===")
+        
+        # 1. Initialize RDF Manager (without vector store initially)
+        logger.info("1. Initializing Enhanced RDF Manager...")
+        self.rdf_manager = EnhancedRDFManager(self.ontology_path)
+        self.initialization_status['rdf_manager'] = True
+        logger.info("✓ RDF Manager initialized successfully")
+        
+        # 2. Initialize LLM
+        logger.info("2. Initializing Azure OpenAI LLM...")
+        self.llm = self._setup_llm()
+        if self.llm:
+            self.initialization_status['llm'] = True
+            logger.info("✓ Azure OpenAI LLM initialized successfully")
+        else:
+            logger.warning("⚠ LLM initialization failed")
+        
+        # 3. Initialize Vector Store
+        logger.info("3. Initializing Enhanced Vector Store...")
         try:
-            logger.info("=== Initializing Enhanced RDF Chatbot ===")
-            
-            # 1. Initialize RDF Manager
-            logger.info("1. Initializing Enhanced RDF Manager...")
-            self.rdf_manager = EnhancedRDFManager(self.ontology_path)
-            self.initialization_status['rdf_manager'] = True
-            logger.info("✓ RDF Manager initialized successfully")
-            
-            # 2. Initialize LLM
-            logger.info("2. Initializing Azure OpenAI LLM...")
-            self.llm = self._setup_llm()
-            if self.llm:
-                self.initialization_status['llm'] = True
-                logger.info("✓ Azure OpenAI LLM initialized successfully")
-            else:
-                logger.warning("⚠ LLM initialization failed")
-            
-            # 3. Set up GraphSparqlQAChain
-            if self.llm and self.rdf_manager:
-                logger.info("3. Setting up GraphSparqlQAChain...")
-                success = self.rdf_manager.setup_sparql_chain(self.llm)
-                self.initialization_status['sparql_chain'] = success
-                if success:
-                    logger.info("✓ GraphSparqlQAChain setup successful")
-                else:
-                    logger.warning("⚠ GraphSparqlQAChain setup failed")
-            
-            # 4. Initialize Vector Store
-            logger.info("4. Initializing Enhanced Vector Store...")
-            try:
-                self.vector_store = EnhancedElasticsearchVectorStore(
-                    hosts=self.elasticsearch_hosts,
-                    index_name=self.index_name,
-                    embedding_model=self.embedding_model,
-                    embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "3072"))
-                )
-                self.initialization_status['vector_store'] = True
-                logger.info("✓ Vector Store initialized successfully")
-            except Exception as e:
-                logger.error(f"⚠ Vector Store initialization failed: {e}")
-                logger.error("Vector search will be disabled. Check Elasticsearch connection.")
-                self.vector_store = None
-                self.initialization_status['vector_store'] = False
-            
-            # 5. Initialize Query Processor
-            logger.info("5. Initializing Enhanced Query Processor...")
-            self.query_processor = EnhancedQueryProcessor(
-                self.rdf_manager, 
-                self.vector_store
+            self.vector_store = EnhancedElasticsearchVectorStore(
+                hosts=self.elasticsearch_hosts,
+                index_name=self.index_name,
+                embedding_model=self.embedding_model,
+                embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "3072"))
             )
-            self.initialization_status['query_processor'] = True
-            logger.info("✓ Query Processor initialized successfully")
-            
-            logger.info("=== Enhanced RDF Chatbot Initialization Complete ===")
-            self._log_initialization_summary()
-            
+            self.initialization_status['vector_store'] = True
+            logger.info("✓ Vector Store initialized successfully")
         except Exception as e:
-            logger.error(f"Error during chatbot initialization: {e}")
-            raise
+            logger.error(f"⚠ Vector Store initialization failed: {e}")
+            logger.error("Vector search will be disabled. Check Elasticsearch connection.")
+            self.vector_store = None
+            self.initialization_status['vector_store'] = False
+        
+        # 4. Update RDF Manager with vector store and setup LangChain integration
+        if self.vector_store:
+            logger.info("4. Updating RDF Manager with vector store...")
+            self.rdf_manager.vector_store = self.vector_store
+            
+            # Reinitialize LangChain integration now that we have the vector store
+            logger.info("Re-initializing LangChain integration with vector store...")
+            self.rdf_manager.setup_langchain_integration()
+        else:
+            logger.info("4. Setting up LangChain integration without vector store...")
+            # LangChain integration was already attempted in RDF manager initialization
+        
+        # 5. Set up GraphSparqlQAChain (if LLM and LangChain integration are available)
+        if self.llm and self.rdf_manager:
+            logger.info("5. Setting up GraphSparqlQAChain...")
+            success = self.rdf_manager.setup_sparql_chain(self.llm)
+            self.initialization_status['sparql_chain'] = success
+            if success:
+                logger.info("✓ GraphSparqlQAChain setup successful")
+            else:
+                logger.warning("⚠ GraphSparqlQAChain setup failed - continuing without it")
+                logger.info("The chatbot will still work using direct SPARQL queries and vector search")
+        else:
+            logger.warning("⚠ Cannot setup GraphSparqlQAChain - missing LLM or RDF manager")
+            self.initialization_status['sparql_chain'] = False
+        
+        # 6. Initialize Query Processor
+        logger.info("6. Initializing Enhanced Query Processor...")
+        self.query_processor = EnhancedQueryProcessor(
+            self.rdf_manager, 
+            self.vector_store
+        )
+        self.initialization_status['query_processor'] = True
+        logger.info("✓ Query Processor initialized successfully")
+        
+        logger.info("=== Enhanced RDF Chatbot Initialization Complete ===")
+        self._log_initialization_summary()
+        
+    except Exception as e:
+        logger.error(f"Error during chatbot initialization: {e}")
+        logger.error("Traceback:", exc_info=True)
+        raise
     
     def _setup_llm(self) -> Optional[AzureChatOpenAI]:
         """Set up Azure OpenAI LLM with token authentication."""
